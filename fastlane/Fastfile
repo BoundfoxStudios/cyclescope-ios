@@ -1,0 +1,103 @@
+APP_IDENTIFIER = "com.boundfoxstudios.apps.cyclescope"
+PROFILE_NAME = "CycleScope App Store"
+
+# Apple rejects uploads for a version at or below one it has approved
+# (ITMS-90186, ITMS-90062), so those builds are not uploaded
+def approved_version_blocking_upload(version)
+  app = Spaceship::ConnectAPI::App.find(APP_IDENTIFIER)
+  UI.user_error!("App Store Connect has no app with the bundle identifier #{APP_IDENTIFIER}") if app.nil?
+
+  state = Spaceship::ConnectAPI::AppStoreVersion::AppVersionState
+  highest_approved = app.get_app_store_versions(
+    filter: {
+      platform: Spaceship::ConnectAPI::Platform::IOS,
+      appVersionState: [
+        state::ACCEPTED,
+        state::PENDING_APPLE_RELEASE,
+        state::PENDING_DEVELOPER_RELEASE,
+        state::PROCESSING_FOR_DISTRIBUTION,
+        state::READY_FOR_DISTRIBUTION,
+        state::REPLACED_WITH_NEW_VERSION
+      ].join(",")
+    },
+    includes: nil
+  ).max_by { |app_store_version| Gem::Version.new(app_store_version.version_string) }
+
+  return nil if highest_approved.nil?
+  return nil if Gem::Version.new(version) > Gem::Version.new(highest_approved.version_string)
+
+  highest_approved
+end
+
+platform :ios do
+  desc "Build a signed IPA and upload it to TestFlight unless App Store Connect already approved its version"
+  lane :release do
+    build_signed_ipa
+
+    generated_config = File.read(File.join(ENV.fetch("GITHUB_WORKSPACE"), "app", "ios", "Flutter", "Generated.xcconfig"))
+    version = generated_config[/^FLUTTER_BUILD_NAME=(.+)$/, 1] || UI.user_error!("Generated.xcconfig has no FLUTTER_BUILD_NAME")
+    blocking_version = approved_version_blocking_upload(version)
+
+    if blocking_version
+      message = "Built #{version} but did not upload it: App Store version #{blocking_version.version_string} is #{blocking_version.app_version_state}. Raise the version in the upstream pubspec.yaml above it."
+      # Plain puts: fastlane's UI prefixes lines, which hides the workflow command
+      puts("::notice title=Upload skipped::#{message}")
+      File.write(ENV.fetch("GITHUB_STEP_SUMMARY"), "#{message}\n", mode: "a")
+    else
+      upload_to_testflight(skip_waiting_for_build_processing: true)
+    end
+  end
+
+  # Automatic signing would mint a fresh development certificate on every
+  # ephemeral runner and eventually exhaust the account's certificate quota,
+  # so the archive signs manually with the imported distribution identity
+  private_lane :build_signed_ipa do
+    setup_ci
+
+    team_id = ENV.fetch("APPLE_TEAM_ID")
+
+    api_key = app_store_connect_api_key(
+      key_id: ENV.fetch("APPLE_APP_STORE_CONNECT_KEY_ID"),
+      issuer_id: ENV.fetch("APPLE_APP_STORE_CONNECT_ISSUER_ID"),
+      key_filepath: File.join(ENV.fetch("RUNNER_TEMP"), "AuthKey.p8")
+    )
+
+    import_certificate(
+      certificate_path: File.join(ENV.fetch("RUNNER_TEMP"), "distribution.p12"),
+      certificate_password: ENV.fetch("APPLE_CERTIFICATE_PASSPHRASE"),
+      keychain_name: "fastlane_tmp_keychain",
+      keychain_password: ""
+    )
+
+    get_provisioning_profile(
+      api_key: api_key,
+      app_identifier: APP_IDENTIFIER,
+      team_id: team_id,
+      provisioning_name: PROFILE_NAME,
+      ignore_profiles_with_different_name: true,
+      # Without this, an unusable same-named portal profile (e.g. after a
+      # certificate rotation) makes sigh silently create a timestamp-suffixed
+      # profile that no longer matches the pinned name below
+      fail_on_name_taken: true
+    )
+
+    update_code_signing_settings(
+      path: "app/ios/Runner.xcodeproj",
+      use_automatic_signing: false,
+      team_id: team_id,
+      targets: ["Runner"],
+      code_sign_identity: "Apple Distribution",
+      profile_name: PROFILE_NAME
+    )
+
+    build_app(
+      workspace: "app/ios/Runner.xcworkspace",
+      scheme: "Runner",
+      export_method: "app-store",
+      export_team_id: team_id,
+      export_options: {
+        provisioningProfiles: { APP_IDENTIFIER => PROFILE_NAME }
+      }
+    )
+  end
+end

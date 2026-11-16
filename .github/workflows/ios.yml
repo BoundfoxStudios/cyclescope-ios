@@ -1,0 +1,134 @@
+name: iOS
+
+run-name: Deliver SphaeroX/Serienmessung@${{ inputs.sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Commit of SphaeroX/Serienmessung to deliver (40 lowercase hex characters)
+        required: true
+        type: string
+      flutter-version:
+        description: Flutter version that upstream pins in its workflows (e.g. 3.47.9)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios
+  cancel-in-progress: false
+
+jobs:
+  deliver:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    steps:
+      - name: Validate inputs
+        env:
+          SHA: ${{ inputs.sha }}
+          FLUTTER_VERSION: ${{ inputs.flutter-version }}
+        run: |
+          if [[ ! "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::sha must be 40 lowercase hex characters"
+            exit 1
+          fi
+          if [[ ! "$FLUTTER_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::flutter-version must be a version like 3.47.9"
+            exit 1
+          fi
+      - name: Require a commit on upstream main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ inputs.sha }}
+        # behind or identical: main contains the commit; ahead or diverged:
+        # it is not on main, e.g. the head of a fork pull request
+        run: |
+          status=$(gh api "repos/SphaeroX/Serienmessung/compare/main...$SHA" --jq .status)
+          if [[ "$status" != "behind" && "$status" != "identical" ]]; then
+            echo "::error::$SHA is not on SphaeroX/Serienmessung main (compare status: $status)"
+            exit 1
+          fi
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_27.2.app
+          xcodebuild -version
+      # The pipeline checks out first: a checkout into the workspace root
+      # would delete an app/ directory that already exists there
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SphaeroX/Serienmessung
+          ref: ${{ inputs.sha }}
+          path: app
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: ${{ inputs.flutter-version }}
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: "4.0"
+      - name: Install gems
+        run: bundle install
+        env:
+          BUNDLE_FROZEN: "true"
+      - name: Generate the Xcode configuration
+        working-directory: app
+        run: |
+          flutter pub get --enforce-lockfile
+          flutter build ios --release --config-only --no-codesign --build-number=${{ github.run_number }}
+      - name: Write signing inputs
+        env:
+          APPLE_CERTIFICATE_DATA: ${{ secrets.APPLE_CERTIFICATE_DATA }}
+          APPLE_APP_STORE_CONNECT_KEY: ${{ secrets.APPLE_APP_STORE_CONNECT_KEY }}
+        run: |
+          printf '%s' "$APPLE_CERTIFICATE_DATA" | base64 -d > "$RUNNER_TEMP/distribution.p12"
+          printf '%s' "$APPLE_APP_STORE_CONNECT_KEY" | base64 -d > "$RUNNER_TEMP/AuthKey.p8"
+      - name: Build and upload
+        run: bundle exec fastlane ios release
+        env:
+          APPLE_APP_STORE_CONNECT_KEY_ID: ${{ secrets.APPLE_APP_STORE_CONNECT_KEY_ID }}
+          APPLE_APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APPLE_APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE_PASSPHRASE: ${{ secrets.APPLE_CERTIFICATE_PASSPHRASE }}
+          FASTLANE_SKIP_UPDATE_CHECK: "true"
+          FASTLANE_OPT_OUT_USAGE: "true"
+
+  # Runs dispatched by upstream's app token notify nobody, so a failure opens
+  # or updates an issue. A separate job keeps issues: write away from the job
+  # that runs upstream code next to the signing secrets. A timeout ends as
+  # cancelled, not failure, so cancelled counts too
+  report-failure:
+    needs: deliver
+    if: always() && contains(fromJSON('["failure","cancelled"]'), needs.deliver.result)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ inputs.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="iOS delivery failed"
+          if [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            commit="SphaeroX/Serienmessung@$SHA"
+          else
+            commit="an invalid sha input"
+          fi
+          body="Run $RUN_URL failed for $commit."
+          number=$(gh issue list --state open --search "in:title \"$title\"" --json number,title \
+            --jq "map(select(.title == \"$title\")) | first | .number // empty")
+          if [[ -n "$number" ]]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
