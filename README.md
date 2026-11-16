@@ -18,7 +18,7 @@ Upstream relies on this contract; changing it breaks upstream's `main` builds.
 
 ## What a run does
 
-1. Selects Xcode 27.2 explicitly on GitHub's preview runner image `xcode-27` (uploads need Xcode 26 or newer).
+1. Selects Xcode 27.2 explicitly on the runner image `xcode-27` (uploads need Xcode 26 or newer).
 2. Checks that `sha` is on upstream `main`, then checks out this repo, then upstream at `sha` into `app/`.
 3. Installs Flutter in the input version and Ruby 4.0 with the locked gems; nothing is cached.
 4. Generates the Xcode config: the version is the `FLUTTER_BUILD_NAME` Flutter derives from upstream's `pubspec.yaml` (the version without the `+build` part), the build number is this workflow's run number.

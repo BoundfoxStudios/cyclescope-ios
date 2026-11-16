@@ -18,7 +18,7 @@ This repo is nothing but the pipeline that signs the upstream Flutter app [Sphae
 
 Recorded so they are not proposed again.
 
-- The job runs on GitHub's preview image `xcode-27` with Xcode 27.2 on purpose, although upstream's own CI builds on `macos-latest` with Xcode 26; preview images carry no stability promise, and a toolchain difference shows up only here.
+- The job runs on `xcode-27` with Xcode 27.2 on purpose, although upstream's own CI builds on `macos-latest` with Xcode 26, so a toolchain difference shows up only here. The image is generally available since [2026-10-15](https://github.blog/changelog/2026-10-15-xcode-27-runner-image-generally-available); the "preview" badge in the actions/runner-images README is outdated.
 - One job for build, signing and upload, no build/sign split: upstream code is trusted like own code.
 - The failure report is a separate job only so `issues: write` never reaches the job with upstream code and secrets.
 - `report-failure` fires on `failure` and on `cancelled` because a timeout ends as `cancelled`; a manual cancel of a running delivery therefore reports too. Pending runs replaced through the concurrency group create no jobs and report nothing.
